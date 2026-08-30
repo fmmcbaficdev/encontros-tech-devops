@@ -1,0 +1,79 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: encontros-tech-alerts
+  namespace: monitoring
+  labels:
+    app: prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: encontros-tech.api
+      interval: 30s
+      rules:
+
+        - alert: HighLatency
+          expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+          for: 5m
+          labels:
+            severity: warning
+            team: backend
+          annotations:
+            summary: "Alta latência na API (P95 > 1s)"
+            description: "P95 de latência está em {{ $value | humanizeDuration }}. Verifique queries lentas ou sobrecarga."
+            dashboard: "http://grafana/d/et-app-health"
+
+        - alert: HighErrorRate
+          expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.01
+          for: 5m
+          labels:
+            severity: critical
+            team: backend
+          annotations:
+            summary: "Alta taxa de erros 5xx (> 1%)"
+            description: "Taxa de erro: {{ $value | humanizePercentage }}. Verifique logs e último deploy."
+            dashboard: "http://grafana/d/et-app-health"
+
+        - alert: PodCrashLoopBackOff
+          expr: rate(kube_pod_container_status_restarts_total{namespace="production"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Pod em CrashLoopBackOff: {{ $labels.pod }}"
+            description: "Pod {{ $labels.pod }} reiniciou {{ $value | humanize }} vezes na última hora."
+            dashboard: "http://grafana/d/et-infra"
+
+        - alert: HighCPUUsage
+          expr: sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="production"}[5m])) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Alto uso de CPU: {{ $labels.pod }}"
+            description: "Pod {{ $labels.pod }} usando {{ $value | humanizePercentage }} de CPU."
+            dashboard: "http://grafana/d/et-infra"
+
+        - alert: HighMemoryUsage
+          expr: container_memory_usage_bytes{namespace="production"} / 1024 / 1024 > 400
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Alto uso de memória: {{ $labels.pod }}"
+            description: "Pod {{ $labels.pod }} usando {{ $value | humanize }}MB de RAM."
+            dashboard: "http://grafana/d/et-infra"
+
+        - alert: LowDiskSpace
+          expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.15
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Espaço em disco crítico: {{ $labels.instance }}"
+            description: "Apenas {{ $value | humanizePercentage }} de disco livre em {{ $labels.mountpoint }}."
+            dashboard: "http://grafana/d/et-infra"

@@ -1,0 +1,30 @@
+{
+  "title": "Encontros Tech — Database",
+  "uid": "et-database",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "PostgreSQL Pod Status",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [{ "expr": "kube_pod_status_ready{namespace=\"production\", pod=~\"postgres.*\"}", "legendFormat": "ready" }]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "PostgreSQL CPU (ms/s)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [{ "expr": "rate(container_cpu_usage_seconds_total{namespace=\"production\", pod=~\"postgres.*\"}[5m]) * 1000", "legendFormat": "cpu ms/s" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "PostgreSQL Memory (MB)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [{ "expr": "container_memory_usage_bytes{namespace=\"production\", pod=~\"postgres.*\"} / 1024 / 1024", "legendFormat": "memory MB" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "PVC Usage",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "targets": [{ "expr": "kubelet_volume_stats_used_bytes{namespace=\"production\"} / 1024 / 1024 / 1024", "legendFormat": "{{persistentvolumeclaim}} (GB)" }]
+    }
+  ]
+}

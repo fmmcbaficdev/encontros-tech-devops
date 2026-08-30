@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    name: production
+    monitoring: enabled
+    environment: production
+  annotations:
+    description: "Namespace de produção — Encontros Tech"
