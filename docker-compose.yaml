@@ -1,0 +1,129 @@
+# =============================================================================
+# Encontros Tech — Docker Compose (Desenvolvimento Local)
+# Uso: docker compose --env-file .env.docker up -d
+# =============================================================================
+
+name: encontros-tech
+
+# -----------------------------------------------------------------------------
+# Serviços
+# -----------------------------------------------------------------------------
+services:
+
+  # ---------------------------------------------------------------------------
+  # app — FastAPI
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: runtime
+    container_name: et-app
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      APP_NAME: ${APP_NAME:-encontros-tech-api}
+      APP_VERSION: ${APP_VERSION:-2.0.0}
+      APP_ENV: ${APP_ENV:-development}
+      PORT: "8000"
+      WORKERS: "${WORKERS:-1}"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    volumes:
+      # Hot reload: monta o código-fonte sobre /app no container
+      - ./app:/app:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    networks:
+      - tech-network
+    labels:
+      com.encontros-tech.service: "api"
+      com.encontros-tech.version: "${APP_VERSION:-2.0.0}"
+
+  # ---------------------------------------------------------------------------
+  # postgres — PostgreSQL 15
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: et-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks:
+      - tech-network
+    labels:
+      com.encontros-tech.service: "database"
+
+  # ---------------------------------------------------------------------------
+  # pgadmin — Interface Web para PostgreSQL (opcional)
+  # ---------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: et-pgadmin
+    restart: unless-stopped
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - tech-network
+    labels:
+      com.encontros-tech.service: "pgadmin"
+    profiles:
+      # Sobe apenas quando explicitamente solicitado:
+      # docker compose --profile tools up -d
+      - tools
+
+# -----------------------------------------------------------------------------
+# Volumes nomeados
+# -----------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+    labels:
+      com.encontros-tech.volume: "postgres-data"
+
+  pgadmin_data:
+    driver: local
+    labels:
+      com.encontros-tech.volume: "pgadmin-data"
+
+# -----------------------------------------------------------------------------
+# Rede customizada
+# -----------------------------------------------------------------------------
+networks:
+  tech-network:
+    driver: bridge
+    name: tech-network
+    labels:
+      com.encontros-tech.network: "main"
