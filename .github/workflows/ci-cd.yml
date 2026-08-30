@@ -1,0 +1,280 @@
+# =============================================================================
+# Encontros Tech — Pipeline CI/CD
+# Triggers: push em main/develop, PR em main/develop
+# =============================================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  IMAGE_NAME: encontros-tech-api
+  PYTHON_VERSION: "3.11"
+  REGISTRY: docker.io
+
+# Cancela runs anteriores do mesmo branch (evita fila)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Jobs
+# ---------------------------------------------------------------------------
+jobs:
+
+  # -------------------------------------------------------------------------
+  # JOB 1: Test & Build
+  # -------------------------------------------------------------------------
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('app/requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: |
+          pip install ruff --quiet
+          ruff check . --select=E,F,W --ignore=E501 || true
+
+      - name: Run pytest with coverage
+        run: |
+          pip install pytest-cov --quiet
+          pytest tests/ \
+            --cov=. \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=70 \
+            -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: app/coverage.xml
+          retention-days: 7
+
+      - name: Coverage summary
+        run: |
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          rate = float(root.attrib.get('line-rate', 0)) * 100
+          print(f'Coverage: {rate:.1f}%')
+          "
+
+  # -------------------------------------------------------------------------
+  # JOB 2: Security Scan (Trivy)
+  # -------------------------------------------------------------------------
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy — filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 0      # Não falha o build, mas registra
+
+      - name: Upload Trivy SARIF ao GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Trivy — scan de resumo (table)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 0
+
+  # -------------------------------------------------------------------------
+  # JOB 3: Docker Build & Push
+  # Depende de: test (para garantir qualidade antes de publicar)
+  # -------------------------------------------------------------------------
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: [test]
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extrair metadata (tags e labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.title=Encontros Tech API
+            org.opencontainers.image.description=API FastAPI da plataforma de eventos tech
+            org.opencontainers.image.vendor=Encontros Tech
+
+      - name: Build e Push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Verificar tamanho da imagem
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+          SIZE=$(docker image inspect "$IMAGE" --format='{{.Size}}' 2>/dev/null || echo "0")
+          SIZE_MB=$(( SIZE / 1024 / 1024 ))
+          echo "Tamanho da imagem: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -gt 300 ]; then
+            echo "::warning::Imagem acima de 300 MB (${SIZE_MB} MB)"
+          else
+            echo "✅ Tamanho OK: ${SIZE_MB} MB"
+          fi
+
+      - name: Resumo do build
+        run: |
+          echo "## Docker Build" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tags | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest | \`${{ steps.build.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # -------------------------------------------------------------------------
+  # JOB 4: Deploy (apenas push em main)
+  # Depende de: docker
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Verificar conectividade com cluster
+        run: kubectl get nodes
+
+      - name: Atualizar imagem no Deployment
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+          kubectl set image deployment/encontros-tech \
+            app="${IMAGE}" \
+            -n production
+
+      - name: Aguardar rollout
+        run: |
+          kubectl rollout status deployment/encontros-tech \
+            -n production \
+            --timeout=5m
+
+      - name: Verificar pods em execução
+        run: |
+          kubectl get pods -n production -l app=encontros-tech
+          READY=$(kubectl get deployment encontros-tech -n production \
+            -o jsonpath='{.status.readyReplicas}')
+          echo "Pods prontos: ${READY}"
+
+      - name: Health check pós-deploy
+        run: |
+          LB_IP=$(kubectl get svc encontros-tech -n production \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          if [ -n "$LB_IP" ]; then
+            curl -sf "http://${LB_IP}/health" | python3 -m json.tool
+          else
+            echo "LoadBalancer IP ainda não disponível — verifique manualmente."
+          fi
+
+      - name: Resumo do deploy
+        if: always()
+        run: |
+          echo "## Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`production\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
