@@ -1,6 +1,7 @@
 """
 Encontros Tech API v2
 Aplicação FastAPI com health checks, métricas Prometheus e endpoints de negócio.
+Build: CI/CD via GitHub Actions — Docker Hub push ativo.
 """
 
 import logging
